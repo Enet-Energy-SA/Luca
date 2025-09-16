@@ -8,8 +8,8 @@ import pandas as pd
 import time
 
 BASE_URL = "https://hermes.phinergy.biz/api"
-USERNAME = "luca.bellomi"
-PASSWORD = "OceanosenzaMare44!"
+USERNAME = "usr"
+PASSWORD = "pass"
 
 trader = Trader(USERNAME, PASSWORD, BASE_URL)
 
