@@ -1,0 +1,5 @@
+a) Lancia auctions.py che crea le offer per bilanciare MI1 nel file bids.xlsm, controlla che le offer create siano corrette. 
+b) Scarica i prezzi MI1 dalla schermata prices di Hermes e controlla che i file si chiamino PricesTable(1)...(7)
+c) Lancia fill prices .py che importa i prezzi nell excel e controlla che siano corretti
+d) alle 15.30 manda prima le offers MI1 e poi i bid.
+
