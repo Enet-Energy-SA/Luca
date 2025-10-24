@@ -10,8 +10,7 @@ USERNAME = "luca.bellomi"
 PASSWORD = "OceanosenzaMare44!"
 
 bids = pd.read_excel(r'C:\Users\lbellomi\PycharmProjects\pythonProject\Trader\bids.xlsm', sheet_name=None)
+
 trader = Trader(USERNAME, PASSWORD, BASE_URL, flow_date=bids['Send Bids'].iloc[0,1].date())
 
-trader.fetch_auction()
-trader.generate_bids()
-
+trader.compute_position()

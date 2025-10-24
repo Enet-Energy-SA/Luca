@@ -24,3 +24,4 @@ granularity = 'PT15M'
 market = 'MI1'
 
 trader.bid_auction(pos_list, purpose_list, price_list, qty_list, area_code, unit_code, granularity, market)
+

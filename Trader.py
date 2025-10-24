@@ -7,6 +7,11 @@ import pandas as pd
 from zoneinfo import ZoneInfo
 import openpyxl
 from openpyxl import load_workbook
+import xml.etree.ElementTree as ET
+import uuid
+from lxml import etree
+from pathlib import Path
+import base64
 
 class Trader:
     def __init__(self, username: str, password: str, base_url: str, flow_date: date):
@@ -40,8 +45,8 @@ class Trader:
         """
         response = self.session.post(self.base_url + '/login', json={'username': self.username, 'password': self.password})
         response.raise_for_status()
-        token = response.json()['token']
-        self.session.headers['Authorization'] = f'Bearer {token}'
+        self.token = response.json()['token']
+        self.session.headers['Authorization'] = f'Bearer {self.token}'
         print("Login successful.")
         return response.json()['user']['_id']
 
@@ -191,11 +196,11 @@ class Trader:
 
         bids = pd.DataFrame(columns=['PURPOSE','PERIOD', 'PRICE', 'QTY','TIME', 'ZONA'])
 
-        Pr_std = {'NORD': [8.5, 13, 18], 'SUD': [8.5, 13, 18], 'CSUD': [8.5, 13, 18], 'SICI': [8.5, 13, 18]}
-        Pr_ex = {'NORD': [2.25, -2], 'SUD': [2.25, -2], 'CSUD': [2.25, -2], 'SICI': [2.25, -2]}
+        Pr_std = {'NORD': [8.5, 13, 19.5], 'SUD': [10, 13, 19.5], 'CSUD': [8.5, 13, 19.5], 'SICI': [10, 13, 19.5]}
+        Pr_ex = {'NORD': [1.75, -3], 'SUD': [1.75, -3], 'CSUD': [1.75, -3], 'SICI': [1.75, -3]}
 
-        Qt_std = {'NORD': [2, 4, 8], 'SUD': [2, 4, 8], 'CSUD': [2, 4, 8], 'SICI': [1, 2, 4]}
-        Qt_ex = {'NORD': [8, 6], 'SUD': [8, 6], 'CSUD': [8, 6], 'SICI': [4, 3]}
+        Qt_std = {'NORD': [3, 9, 20], 'SUD': [3, 9, 20], 'CSUD': [3, 9, 20], 'SICI': [2, 6, 12]}
+        Qt_ex = {'NORD': [12, 20], 'SUD': [12, 20], 'CSUD': [12, 20], 'SICI': [8, 12]}
 
         for zona in ['NORD', 'SUD', 'SICI', 'CSUD']:
 
@@ -297,6 +302,232 @@ class Trader:
         else:
             raise Exception(f"❌ Error {response.status_code}: {response.text}")
 
+    def build_xbid_orders_xml(self,
+            zone, granularity, purpose_list, period, price, qty,
+            operator_code="110961",
+            unit_id="UC_DP2502_",
+            receiver_operator="IDGME",
+            execution="None",
+            expiry_time=None
+    ):
+
+        """
+        Build an XML-LTS message for XBID orders from parallel input lists.
+
+        Parameters
+        ----------
+        zone : list[str]
+            Bidding zone (e.g. ["NORD", "CNOR"])
+        granularity : list[str]
+            Granularity strings, "PT15M" (quarter-hour) or "PT60M" (hour)
+        purpose_list : list[str]
+            "BUY" or "SELL" (converted to 'P' or 'S' internally)
+        period : list[int]
+            Delivery intervals (1–96 for QH, 1–24 for hourly)
+        price : list[float]
+            Offer price in €/MWh
+        qty : list[float]
+            Offer qty in MW
+        flow_date : str, optional
+            Delivery date (YYYY-MM-DD). Defaults to today's date.
+        operator_code, unit_id, receiver_operator, execution, expiry_time : str
+            Extra parameters for GME XML header and fields.
+
+        Returns
+        -------
+        bytes : XML document encoded as iso-8859-1
+        """
+
+        # --- Input validation ---
+        n = len(zone)
+        if not all(len(lst) == n for lst in [granularity, purpose_list, period, price, qty]):
+            raise ValueError("All input lists must have the same length")
+
+        # Default dates
+        now = datetime.now(timezone.utc)
+        msg_date = now.strftime("%Y-%m-%d")
+        msg_time = now.strftime("%H:%M:%S.%fZ")
+        if self.flow_date is None:
+            flow_date = msg_date
+        if expiry_time is None:
+            # default expiry at 23:00 UTC same day
+            expiry_time = self.flow_date
+
+        # --- XML namespaces ---
+
+        root = etree.Element(
+            "Message",
+            xmlns="urn:XML-LTS",
+            MessageType="Request",
+            MessageDate=msg_date,
+            MessageTime=msg_time
+        )
+
+        # --- Header ---
+        header = etree.SubElement(root, "Header")
+        sender = etree.SubElement(header, "Sender")
+        etree.SubElement(sender, "CompanyName").text = operator_code
+        etree.SubElement(sender, "UserMsgCode").text = "user"
+        etree.SubElement(sender, "OperatorMsgCode").text = operator_code
+
+        receiver = etree.SubElement(header, "Receiver")
+        etree.SubElement(receiver, "OperatorMsgCode").text = receiver_operator
+
+        # --- Transaction ---
+        transaction = etree.SubElement(root, "Transaction")
+        basket = etree.SubElement(transaction, "OffersBasket")
+        etree.SubElement(basket, "Execution").text = execution
+        offers_outer = etree.SubElement(basket, "Offers")
+
+        count = 0
+
+        # --- Offers loop ---
+        for zone, gran, purpose, period, price, qty in zip(zone, granularity, purpose_list, period, price, qty):
+            count += 1
+            offer_el = etree.SubElement(offers_outer, "Offers")
+            etree.SubElement(offer_el, "OperatorCode").text = operator_code
+            etree.SubElement(offer_el, "FlowDate").text = self.flow_date
+            etree.SubElement(offer_el, "ZoneCode").text = zone
+            etree.SubElement(offer_el, "UnitId").text = unit_id + zone
+            etree.SubElement(offer_el, "ExternalNotes").text = 'ORD_' + str(count)
+
+            # Determine interval type
+            interval_type = "QH" if gran == "PT15M" else "FH"
+            interval_el = etree.SubElement(offer_el, "Interval", type=interval_type)
+            interval_el.text = str(period)
+
+            # Purpose: convert BUY/SELL to P/S
+            etree.SubElement(offer_el, "Purpose").text = "P" if purpose.upper() == "BUY" else "S"
+            etree.SubElement(offer_el, "Status").text = "A"
+            etree.SubElement(offer_el, "ExpiryTime").text = expiry_time
+            etree.SubElement(offer_el, "Qty").text = str(qty)
+            etree.SubElement(offer_el, "Price").text = str(price)
+
+        # --- Serialize ---
+        xml_bytes = etree.tostring(
+            root,
+            pretty_print=True,
+            encoding="iso-8859-1",
+            xml_declaration=True
+        )
+
+        output_path = Path(r'C:\Users\lbellomi\PycharmProjects\pythonProject\Trader\orders\orders_' + self.flow_date.replace(":", "-") + '_XBID.xml')
+        output_path.write_bytes(xml_bytes)
+
+    def submit_xbid_xml(self):
+        # Read file
+        xml_path = r'C:\Users\lbellomi\PycharmProjects\pythonProject\Trader\orders\orders_' + self.flow_date.replace(":", "-") + '_XBID.xml'
+        xml_bytes = Path(xml_path).read_bytes()
+        # Encode to base64
+        xml_b64 = base64.b64encode(xml_bytes).decode("ascii")
+
+        # Prepare JSON payload
+        payload = {
+            "name": Path(xml_path).name,
+            "content": xml_b64
+        }
+
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json"
+        }
+
+        # POST to Hermes
+        response = requests.post(self.base_url + '/files/xbidws', json=payload, headers=headers)
+        if response.status_code == 200:
+            print("✅ File successfully submitted to Hermes.")
+        else:
+            print("❌ Submission failed:", response.status_code, response.text)
+
+        return response.json()
+
+    def compute_position(self):
+        """
+        Computes the current position, with size exposure and weighted avg price
+        """
+
+        # fetching the trades and rearranging them
+        query = {
+            'resolution': 'PT15M',  # or 'PT15M' depending on your use case
+        }
+
+        response = self.session.request(
+            'get',
+            f"{self.base_url}/trades",
+            params={
+                'delivery_from': self.flow_date,
+                'delivery_to': self.next_flow_date,
+                'query$': json.dumps(query),
+            }
+        )
+
+        trades = response.json().get('data', [])
+        trades = pd.DataFrame(trades)
+        trades = trades.loc[:,
+                 ['buyer_unit_code', 'delivery_start', 'price', 'quantity', 'resolution', 'seller_unit_code', 'buyer_hermes_txt', 'seller_hermes_txt']]
+
+        trades.loc[trades.loc[:, 'buyer_unit_code'].isna() == False, 'zona'] = trades.loc[
+            trades.loc[:, 'buyer_unit_code'].isna() == False, 'buyer_unit_code']
+        trades.loc[trades.loc[:, 'seller_unit_code'].isna() == False, 'zona'] = trades.loc[
+            trades.loc[:, 'seller_unit_code'].isna() == False, 'seller_unit_code']
+        trades.loc[:, 'zona'] = trades.loc[:, 'zona'].apply(lambda d: d.split('_')[2])
+        trades.loc[trades.loc[:, 'buyer_unit_code'].isna() == False, 'type'] = 'BUY'
+        trades.loc[trades.loc[:, 'seller_unit_code'].isna() == False, 'type'] = 'SELL'
+        trades = trades.drop(columns=['buyer_unit_code', 'seller_unit_code'])
+        trades.loc[:, 'delivery_start'] = trades.loc[:, 'delivery_start'].apply(
+            lambda d: datetime.strptime(d, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=ZoneInfo("UTC")))
+        trades.loc[:, 'delivery_start'] = trades.loc[:, 'delivery_start'].apply(lambda d: d.astimezone(self.rome_tz))
+        trades.loc[:, 'period'] = trades.loc[:, 'delivery_start'].apply(lambda t: t.hour * 4 + t.minute // 15 + 1)
+
+        unit_codes = list(trades.loc[:, 'zona'].unique())
+        position = self.imbalance_position(unit_codes)
+
+        order_book = pd.DataFrame()
+
+        for resolution in trades.loc[:, 'resolution'].unique():
+            for area_code in trades.loc[:, 'zona'].unique():
+
+                # fetching the books and rearranging them
+                params = {
+                    'flowDate': self.flow_date,
+                    'resolution': resolution,
+                    'deliveryAreaId': area_code,
+                    'marketPlayer': self.market_player
+                }
+
+                response = self.session.get(f"{self.base_url}/xbid/books", params=params)
+
+                book = response.json()["data"]
+                book = pd.DataFrame(book)
+
+                books = pd.DataFrame(columns=['BestBidQty', 'BestBid', 'BestAsk', 'BestAskQty', 'Interval'])
+                books.loc[:, 'BestBidQty'] = book.loc[:, 'contractItems'].apply(lambda c: c.get('bestBidQty')).values
+                books.loc[:, 'BestBid'] = book.loc[:, 'contractItems'].apply(lambda c: c.get('bestBidPr')).values
+                books.loc[:, 'BestAskQty'] = book.loc[:, 'contractItems'].apply(lambda c: c.get('bestAskQty')).values
+                books.loc[:, 'BestAsk'] = book.loc[:, 'contractItems'].apply(lambda c: c.get('bestAskPr')).values
+                books.loc[:, 'Interval'] = book.loc[:, 'contractItems'].apply(lambda c: c.get('interval')).values
+                books.loc[:, 'Flow date'] = book.loc[:, 'contractItems'].apply(lambda c: c.get('flowDate')).values
+                books.loc[:, 'Flow date'] = book.loc[:, 'contractItems'].apply(lambda c: c.get('flowDate')).values
+                books.loc[:, 'timeresolution'] = book.loc[:, 'contractItems'].apply(
+                    lambda c: c.get('timeresolution')).values
+
+                date_filter = datetime.strptime(self.flow_date, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                date_filter = date_filter + timedelta(days=1)
+                date_filter = date_filter.strftime("%y%m%d")
+
+                books = books.loc[books.loc[:, 'Flow date'] == date_filter, :]
+
+                if resolution == 'PT15M':
+                    books = books.loc[books.loc[:, 'timeresolution'] == 'QH', :]
+
+                elif resolution == 'PT60M':
+                    books = books.loc[books.loc[:, 'timeresolution'] == 'FH', :]
+
+                order_book = pd.concat([order_book, books])
+
+        return trades
+
+
 def create_payload(pos_list: List[int], purpose_list: List[str], price_list: List[float], qty_list: List[float], area_code: List[str], unit_code: List[str], flow_date: str, granularity: str, message: str):
     """
     Creates the dictionary to be sent to the market via API
@@ -379,98 +610,7 @@ def find_closing_prices(df1, df2):
 
     return pd.DataFrame(results, columns=["period","closing_type","closing_price","new_buy_avg","new_sell_avg","spread"])
 
-def compute_position(self):
-    """
-    Computes the current position, with size exposure and weighted avg price
-    """
 
-    # fetching the trades and rearranging them
-    query = {
-        'resolution': 'PT15M',  # or 'PT15M' depending on your use case
-    }
-
-    response = self.session.request(
-        'get',
-        f"{self.base_url}/trades",
-        params={
-            'delivery_from': self.flow_date,
-            'delivery_to': self.next_flow_date,
-            'query$': json.dumps(query),
-        }
-    )
-
-    trades = response.json().get('data', [])
-    trades = pd.DataFrame(trades)
-    trades = trades.loc[:,
-             ['buyer_unit_code', 'delivery_start', 'price', 'quantity', 'resolution', 'seller_unit_code']]
-
-    trades.loc[trades.loc[:, 'buyer_unit_code'].isna() == False, 'zona'] = trades.loc[
-        trades.loc[:, 'buyer_unit_code'].isna() == False, 'buyer_unit_code']
-    trades.loc[trades.loc[:, 'seller_unit_code'].isna() == False, 'zona'] = trades.loc[
-        trades.loc[:, 'seller_unit_code'].isna() == False, 'seller_unit_code']
-    trades.loc[:, 'zona'] = trades.loc[:, 'zona'].apply(lambda d: d[-4:])
-    trades.loc[trades.loc[:, 'buyer_unit_code'].isna() == False, 'type'] = 'BUY'
-    trades.loc[trades.loc[:, 'seller_unit_code'].isna() == False, 'type'] = 'SELL'
-    trades = trades.drop(columns=['buyer_unit_code', 'seller_unit_code'])
-    trades.loc[:, 'delivery_start'] = trades.loc[:, 'delivery_start'].apply(
-        lambda d: datetime.strptime(d, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=ZoneInfo("UTC")))
-    trades.loc[:, 'delivery_start'] = trades.loc[:, 'delivery_start'].apply(lambda d: d.astimezone(self.rome_tz))
-    trades.loc[:, 'period'] = trades.loc[:, 'delivery_start'].apply(lambda t: t.hour * 4 + t.minute // 15 + 1)
-
-    position = trades.loc[:, ['price', 'quantity', 'period', 'type']].groupby(["period", "type"]).apply(
-        weighted_avg_price).reset_index(name="weighted_avg_price")
-    exposure = trades.loc[:, ['quantity', 'period', 'type']].groupby(["period", "type"]).sum().reset_index()
-    exposure.loc[exposure.loc[:, 'type'] == 'BUY', 'quantity'] = exposure.loc[exposure.loc[:,
-                                                                              'type'] == 'BUY', 'quantity'] * (-1)
-    exposure = exposure.loc[:, ['quantity', 'period']].groupby('period').sum().reset_index()
-    exposure = exposure.rename(columns={'quantity': 'exposure'})
-
-    result = find_closing_prices(position, exposure)
-
-    order_book = pd.DataFrame()
-
-    for resolution in trades.loc[:, 'resolution'].unique():
-        for area_code in trades.loc[:, 'zona'].unique():
-
-            # fetching the books and rearranging them
-            params = {
-                'flowDate': self.flow_date,
-                'resolution': resolution,
-                'deliveryAreaId': area_code,
-                'marketPlayer': self.market_player
-            }
-
-            response = self.session.get(f"{self.base_url}/xbid/books", params=params)
-
-            book = response.json()["data"]
-            book = pd.DataFrame(book)
-
-            books = pd.DataFrame(columns=['BestBidQty', 'BestBid', 'BestAsk', 'BestAskQty', 'Interval'])
-            books.loc[:, 'BestBidQty'] = book.loc[:, 'contractItems'].apply(lambda c: c.get('bestBidQty')).values
-            books.loc[:, 'BestBid'] = book.loc[:, 'contractItems'].apply(lambda c: c.get('bestBidPr')).values
-            books.loc[:, 'BestAskQty'] = book.loc[:, 'contractItems'].apply(lambda c: c.get('bestAskQty')).values
-            books.loc[:, 'BestAsk'] = book.loc[:, 'contractItems'].apply(lambda c: c.get('bestAskPr')).values
-            books.loc[:, 'Interval'] = book.loc[:, 'contractItems'].apply(lambda c: c.get('interval')).values
-            books.loc[:, 'Flow date'] = book.loc[:, 'contractItems'].apply(lambda c: c.get('flowDate')).values
-            books.loc[:, 'Flow date'] = book.loc[:, 'contractItems'].apply(lambda c: c.get('flowDate')).values
-            books.loc[:, 'timeresolution'] = book.loc[:, 'contractItems'].apply(
-                lambda c: c.get('timeresolution')).values
-
-            date_filter = datetime.strptime(self.flow_date, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-            date_filter = date_filter + timedelta(days=1)
-            date_filter = date_filter.strftime("%y%m%d")
-
-            books = books.loc[books.loc[:, 'Flow date'] == date_filter, :]
-
-            if resolution == 'PT15M':
-                books = books.loc[books.loc[:, 'timeresolution'] == 'QH', :]
-
-            elif resolution == 'PT60M':
-                books = books.loc[books.loc[:, 'timeresolution'] == 'FH', :]
-
-            order_book = pd.concat([order_book, books])
-
-    return trades
 
 def create_auction_payload(pos_list: List[int], purpose_list: List[str], price_list: List[float], qty_list: List[float], area_code: List[str], unit_code: List[str], flow_date: str, granularity: str, market: str):
     """

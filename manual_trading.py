@@ -25,14 +25,14 @@ keys = bids['Send Bids'].loc[:, 'Bidding Area']
 
 if keys.values[0] == 'MI1':
 
-    for key in keys:
+    key = 'MI1'
 
-        granularity = granularity + list(bids[key].loc[:, 'TIME'].values)
-        purpose = purpose + list(bids[key].loc[:, 'PURPOSE'].values)
-        period = period + list(bids[key].loc[:, 'PERIOD'].values)
-        price = price + list(bids[key].loc[:, 'PRICE'].values)
-        qty = qty + list(bids[key].loc[:, 'QTY'].values)
-        zone = zone + list(bids[key].loc[:, 'ZONA'].values)
+    granularity = granularity + list(bids[key].loc[:, 'TIME'].values)
+    purpose = purpose + list(bids[key].loc[:, 'PURPOSE'].values)
+    period = period + list(bids[key].loc[:, 'PERIOD'].values)
+    price = price + list(bids[key].loc[:, 'PRICE'].values)
+    qty = qty + list(bids[key].loc[:, 'QTY'].values)
+    zone = zone + list(bids[key].loc[:, 'ZONA'].values)
 
     trader.place_orders(zone=zone, granularity=granularity[0], purpose_list=purpose, period=[int(x) for x in period],
                         price=[float(x) for x in price], qty=[float(x) for x in qty], message=key)
@@ -69,3 +69,10 @@ else:
 
     trader.place_orders(zone=zone, granularity=granularity[0], purpose_list=purpose, period=[int(x) for x in period],
                         price=[float(x) for x in price], qty=[float(x) for x in qty], message=key)
+
+
+# trader.build_xbid_orders_xml(zone=zone, granularity=granularity, purpose_list=purpose, period=[int(x) for x in period],
+#                         price=[float(x) for x in price], qty=[float(x) for x in qty])
+#
+# trader.submit_xbid_xml()
+
