@@ -86,8 +86,79 @@ class Trader:
 
         prices = pd.read_excel(r'C:\Users\lbellomi\PycharmProjects\pythonProject\Trader\bids.xlsm', sheet_name=None)
         prices = prices['Prices']
-        prices = prices.iloc[:, [0, 14, 15, 16, 17, 21]]
+        prices = prices.iloc[:, [0, 11, 12, 13, 14, 21]]
         prices = prices.rename(columns={'NORD.1': 'NORD', 'SICI.1': 'SICI', 'SUD.1': 'SUD', 'CSUD.1': 'CSUD', 'Unnamed: 21': 'date'})
+        prices.loc[:, 'flow_date'] = prices.loc[:, 'date'].apply(lambda d: d.date())
+        prices = prices.melt(id_vars=["period", 'flow_date'], var_name="unit_reference_number", value_name="MGP")
+
+        orders = orders.merge(prices.loc[:, ['period','flow_date','unit_reference_number', 'MGP']], on=['period','flow_date','unit_reference_number'], how='left')
+        orders.loc[:, 'diff'] = orders.loc[:, 'MGP'] - orders.loc[:, 'awarded_price']
+
+        for ind in orders.index:
+
+            if orders.loc[ind, 'diff'] <= 14.9:
+                orders.loc[ind, 'perc'] = 0.2999
+
+            elif (orders.loc[ind, 'diff'] > 14.9) and (orders.loc[ind, 'diff'] < 20):
+                orders.loc[ind, 'perc'] = 0.35
+
+            else:
+                orders.loc[ind, 'perc'] = 0.4
+
+        orders.loc[:, 'bids'] = orders.loc[:, 'awarded_price'] + orders.loc[:, 'diff'] * orders.loc[:, 'perc']
+
+        bids = wb["MI1"]
+        start_row = 2
+
+        for i, (price, period, zone, qty) in enumerate(zip(orders["bids"], orders["period"], orders["unit_reference_number"], orders["awarded_quantity"]), start=start_row):
+
+            bids.cell(row=i, column=3, value=price)
+            bids.cell(row=i, column=2, value=period)
+            bids.cell(row=i, column=6, value=zone)
+            bids.cell(row=i, column=4, value=qty)
+            bids.cell(row=i, column=1, value='SELL')
+            bids.cell(row=i, column=5, value='PT15M')
+
+        wb.save(file)
+
+    def fetch_auction_new(self):
+
+        query = {
+            'resolution': 'PT15M',
+            'date': self.flow_date,
+            'market': 'MI1',
+            'status': 'Accept'
+            # or 'PT15M' depending on your use case
+        }
+
+        response = self.session.request(
+            'get',
+            f"{self.base_url}/offers",
+            params={
+                'query$': json.dumps(query),
+            }
+        )
+
+        orders = response.json().get('data', [])
+        orders = pd.DataFrame(orders)
+        orders = orders.loc[:, ['awarded_price', 'awarded_quantity', 'delivery_start', 'unit_reference_number']]
+
+        orders["delivery_start"] = pd.to_datetime(orders["delivery_start"], utc=True)
+        orders["delivery_start"] = orders["delivery_start"].dt.tz_convert("Europe/Rome")
+        orders["period"] = orders["delivery_start"].dt.hour * 4 + orders["delivery_start"].dt.minute // 15 + 1
+        orders["flow_date"] = orders["delivery_start"].dt.date
+
+        orders = orders.drop(columns='delivery_start')
+        orders.loc[:, 'unit_reference_number'] = orders.loc[:, 'unit_reference_number'].apply(lambda z: z.replace('UC_DP2502_',''))
+        orders = orders.groupby(['awarded_price', 'unit_reference_number', 'period', 'flow_date']).sum().reset_index()
+
+        file = r"C:\Users\lbellomi\PycharmProjects\pythonProject\Trader\bids.xlsm"
+        wb = openpyxl.load_workbook(file, keep_vba=True)
+
+        prices = pd.read_excel(r'C:\Users\lbellomi\PycharmProjects\pythonProject\Trader\bids.xlsm', sheet_name=None)
+        prices = prices['Prices']
+        prices = prices.iloc[:, [0, 11, 12, 13, 14, 15, 16, 17, 21]]
+        prices = prices.rename(columns={'NORD.1': 'NORD', 'SICI.1': 'SICI', 'SUD.1': 'SUD', 'CSUD.1': 'CSUD', 'CALA.1': 'CALA', 'CNOR.1': 'CNOR', 'SARD.1': 'SARD', 'Unnamed: 21': 'date'})
         prices.loc[:, 'flow_date'] = prices.loc[:, 'date'].apply(lambda d: d.date())
         prices = prices.melt(id_vars=["period", 'flow_date'], var_name="unit_reference_number", value_name="MGP")
 
@@ -176,12 +247,42 @@ class Trader:
 
         return df
 
+    def target_position(self, unit_id: List[str]):
+
+        df = pd.DataFrame()
+
+        for id in unit_id:
+
+            response = self.session.request(
+                'get',
+                self.base_url + '/units/programs-and-economics',
+                params={
+                    'delivery_from': self.flow_date,
+                    'delivery_to': self.next_flow_date,
+                    'unit': 'UC_DP2502_' + id,
+                })
+
+            data = pd.DataFrame(response.json()['data'])
+
+            if not data.empty:
+                data.loc[:, 'zone'] = id
+                df = pd.concat([df, data])
+
+        df = df.loc[:, ['commercial_imbalance','delivery_start', 'total_target', 'zone']]
+
+        df["delivery_start"] = pd.to_datetime(df["delivery_start"], utc=True)
+        df["delivery_start"] = df["delivery_start"].dt.tz_convert("Europe/Rome")
+        df["period"] = df["delivery_start"].dt.hour * 4 + df["delivery_start"].dt.minute // 15 + 1
+        df["flow_date"] = df["delivery_start"].dt.date
+
+        return df
+
     def generate_bids(self):
 
         prices = pd.read_excel(r'C:\Users\lbellomi\PycharmProjects\pythonProject\Trader\bids.xlsm', sheet_name=None)
         prices = prices['Prices']
 
-        prices = prices.iloc[:, [0, 1, 2, 3, 4, 14, 15, 16, 17, 21]]
+        prices = prices.iloc[:, [0, 1, 2, 3, 4, 11, 12, 13, 14, 21]]
         prices = prices.rename(columns={'NORD.1': 'NORD_MGP', 'SICI.1': 'SICI_MGP', 'SUD.1': 'SUD_MGP', 'CSUD.1': 'CSUD_MGP', 'NORD': 'NORD_MI1', 'SICI': 'SICI_MI1', 'SUD': 'SUD_MI1', 'CSUD': 'CSUD_MI1', 'Unnamed: 21': 'date'})
         prices.loc[:, 'flow_date'] = prices.loc[:, 'date'].apply(lambda d: d.date())
 
@@ -196,17 +297,135 @@ class Trader:
 
         bids = pd.DataFrame(columns=['PURPOSE','PERIOD', 'PRICE', 'QTY','TIME', 'ZONA'])
 
-        Pr_std = {'NORD': [8.5, 13, 19.5], 'SUD': [10, 13, 19.5], 'CSUD': [8.5, 13, 19.5], 'SICI': [10, 13, 19.5]}
-        Pr_ex = {'NORD': [1.75, -3], 'SUD': [1.75, -3], 'CSUD': [1.75, -3], 'SICI': [1.75, -3]}
+        Pr_std = {'NORD': [8.5, 13, 19.5], 'SUD': [8.5, 13, 19.5], 'CSUD': [8.5, 13, 19.5], 'SICI': [8.5, 13, 19.5]}
+        Pr_ex = {'NORD': [1.75, -2.20], 'SUD': [1.75, -2.20], 'CSUD': [1.75, -2.20], 'SICI': [1.75, -2.20]}
 
-        Qt_std = {'NORD': [3, 9, 20], 'SUD': [3, 9, 20], 'CSUD': [3, 9, 20], 'SICI': [2, 6, 12]}
-        Qt_ex = {'NORD': [12, 20], 'SUD': [12, 20], 'CSUD': [12, 20], 'SICI': [8, 12]}
+        Qt_std = {'NORD': [4, 8, 16], 'SUD': [4, 8, 16], 'CSUD': [4, 8, 16], 'SICI': [2, 4, 8]}
+        Qt_ex = {'NORD': [12, 14], 'SUD': [12, 14], 'CSUD': [12, 14], 'SICI': [6, 8]}
 
         for zona in ['NORD', 'SUD', 'SICI', 'CSUD']:
 
             temp = prices.loc[:, ['period', 'flow_date', zona + '_MI1', 'DIFF_' + zona]]
             temp_norm = temp.loc[temp.loc[:, 'DIFF_' + zona] < 15, :]
             temp_extra = temp.loc[temp.loc[:, 'DIFF_' + zona] >= 15, :]
+
+            for i in zip(Pr_std[zona], Qt_std[zona]):
+
+                temp_b = pd.DataFrame(columns=['PURPOSE','PERIOD', 'PRICE','QTY','TIME', 'ZONA'])
+                temp_b.loc[:, 'PERIOD'] = temp_norm.loc[:, 'period'].values
+                temp_b.loc[:, 'PURPOSE'] = 'BUY'
+                temp_b.loc[:, 'QTY'] = i[1]
+                temp_b.loc[:, 'PRICE'] = (temp_norm.loc[:, zona + '_MI1'] - i[0]).values
+                temp_b.loc[:, 'TIME'] = 'PT15M'
+                temp_b.loc[:, 'ZONA'] = zona
+                bids = pd.concat([bids, temp_b])
+
+            if temp_extra.shape[0] == 1:
+
+                for i in zip(Pr_ex[zona], Qt_ex[zona]):
+                    temp_b = pd.DataFrame(columns=['PURPOSE', 'PERIOD', 'PRICE', 'QTY', 'TIME'])
+                    temp_b.loc[0, 'PERIOD'] = temp_extra.loc[:, 'period'].values[0]
+                    temp_b.loc[0, 'PURPOSE'] = 'BUY'
+                    temp_b.loc[0, 'QTY'] = i[1]
+                    temp_b.loc[0, 'PRICE'] = (temp_extra.loc[:, zona + '_MI1'] - temp_extra.loc[:, 'DIFF_' + zona] + i[0]).values[0]
+                    temp_b.loc[0, 'TIME'] = 'PT15M'
+                    temp_b.loc[0, 'ZONA'] = zona
+                    bids = pd.concat([bids, temp_b])
+
+            elif not temp_extra.empty:
+
+                for i in zip(Pr_ex[zona], Qt_ex[zona]):
+                    temp_b = pd.DataFrame(columns=['PURPOSE', 'PERIOD', 'PRICE', 'QTY', 'TIME'])
+                    temp_b.loc[:, 'PERIOD'] = temp_extra.loc[:, 'period'].values
+                    temp_b.loc[:, 'PURPOSE'] = 'BUY'
+                    temp_b.loc[:, 'QTY'] = i[1]
+                    temp_b.loc[:, 'PRICE'] = (temp_extra.loc[:, zona + '_MI1'] - temp_extra.loc[:, 'DIFF_' + zona] + i[0]).values
+                    temp_b.loc[:, 'TIME'] = 'PT15M'
+                    temp_b.loc[:, 'ZONA'] = zona
+                    bids = pd.concat([bids, temp_b])
+            else:
+                continue
+
+        bids = bids.reset_index(drop=True)
+
+        file_path = r'C:\Users\lbellomi\PycharmProjects\pythonProject\Trader\bids.xlsm'
+        sheet_name = "BIDS"
+        rows_per_block = 100
+        cols_per_block = 6
+        col_gap = 1
+
+        # Load workbook and sheet
+        wb = load_workbook(file_path, keep_vba=True)
+        ws = wb[sheet_name]
+
+        # Optional: clear previous content
+        for row in ws.iter_rows():
+            for cell in row:
+                cell.value = None
+
+        # Number of blocks (each block = up to 100 rows)
+        num_blocks = -(-len(bids) // rows_per_block)  # ceiling division
+
+        base_headers = ["PURPOSE", "PERIOD", "PRICE", "QTY", "TIME", "ZONA"]
+
+        for block_index in range(num_blocks):
+            start_row = 2
+            start_col = block_index * (cols_per_block + col_gap) + 1
+
+            headers = [f"{name}-{block_index + 1}" for name in base_headers]
+
+            # --- Write headers ---
+            for c_idx, header in enumerate(headers, start=start_col):
+                ws.cell(row=1, column=c_idx, value=header)
+
+            # Select slice of data
+            block_df = bids.iloc[
+                       block_index * rows_per_block: (block_index + 1) * rows_per_block
+                       ]
+
+            # Write each block
+            for r_idx, row in enumerate(block_df.itertuples(index=False), start=start_row):
+                for c_idx, value in enumerate(row, start=start_col):
+                    ws.cell(row=r_idx, column=c_idx, value=value)
+
+        # Save workbook
+        wb.save(file_path)
+
+    def generate_bids_new(self):
+
+        prices = pd.read_excel(r'C:\Users\lbellomi\PycharmProjects\pythonProject\Trader\bids.xlsm', sheet_name=None)
+        prices = prices['Prices']
+
+        prices = prices.iloc[:, [0, 1, 2, 3, 4, 5, 6, 7, 11, 12, 13, 14, 15, 16, 17, 21]]
+        prices = prices.rename(columns={'NORD.1': 'NORD_MGP', 'SICI.1': 'SICI_MGP', 'SUD.1': 'SUD_MGP', 'CSUD.1': 'CSUD_MGP', 'CALA.1': 'CALA_MGP', 'CNOR.1': 'CNOR_MGP', 'SARD.1': 'SARD_MGP',
+                                        'NORD': 'NORD_MI1', 'SICI': 'SICI_MI1', 'SUD': 'SUD_MI1', 'CSUD': 'CSUD_MI1', 'CALA': 'CALA_MI1', 'SARD': 'SARD_MI1', 'CNOR': 'CNOR_MI1', 'Unnamed: 21': 'date'})
+        prices.loc[:, 'flow_date'] = prices.loc[:, 'date'].apply(lambda d: d.date())
+
+        prices = prices.drop(columns='date')
+
+        prices.loc[:, 'DIFF_NORD'] = prices.loc[:, 'NORD_MI1'] - prices.loc[:, 'NORD_MGP']
+        prices.loc[:, 'DIFF_SUD'] = prices.loc[:, 'SUD_MI1'] - prices.loc[:, 'SUD_MGP']
+        prices.loc[:, 'DIFF_SICI'] = prices.loc[:, 'SICI_MI1'] - prices.loc[:, 'SICI_MGP']
+        prices.loc[:, 'DIFF_CSUD'] = prices.loc[:, 'CSUD_MI1'] - prices.loc[:, 'CSUD_MGP']
+        prices.loc[:, 'DIFF_CALA'] = prices.loc[:, 'CALA_MI1'] - prices.loc[:, 'CALA_MGP']
+        prices.loc[:, 'DIFF_SARD'] = prices.loc[:, 'SARD_MI1'] - prices.loc[:, 'SARD_MGP']
+        prices.loc[:, 'DIFF_CNOR'] = prices.loc[:, 'CNOR_MI1'] - prices.loc[:, 'CNOR_MGP']
+
+        prices = prices.loc[:, ['period', 'flow_date', 'NORD_MI1', 'CSUD_MI1', 'SUD_MI1', 'SICI_MI1', 'CALA_MI1', 'SARD_MI1', 'CNOR_MI1', 'DIFF_NORD', 'DIFF_SUD', 'DIFF_CSUD', 'DIFF_SICI', 'DIFF_CALA', 'DIFF_SARD', 'DIFF_CNOR']]
+
+        bids = pd.DataFrame(columns=['PURPOSE','PERIOD', 'PRICE', 'QTY','TIME', 'ZONA'])
+
+        Pr_std = {'NORD': [7.5, 11.5, 17], 'SUD': [7.5, 11.5, 17], 'CSUD': [7.5, 11.5, 17], 'SICI': [7.5, 11.5, 17],'CALA': [7.5, 11.5, 17],'SARD': [7.5, 11.5, 17],'CNOR': [7.5, 11.5, 17]}
+        Pr_ex = {'NORD': [2, -2.5], 'SUD': [2, -2.5], 'CSUD': [2, -2.5], 'SICI': [2, -2.5], 'CALA': [2, -2.5], 'SARD': [2, -2.5], 'CNOR': [2, -2.5]}
+
+        Qt_std = {'NORD': [4, 8, 16], 'SUD': [4, 8, 16], 'CSUD': [4, 8, 16], 'SICI': [2, 4, 8], 'CALA': [2, 4, 8], 'SARD': [2, 4, 8], 'CNOR': [2, 4, 8]}
+        Qt_ex = {'NORD': [12, 14], 'SUD': [12, 14], 'CSUD': [12, 14], 'SICI': [6, 8], 'CALA': [6, 8], 'SARD': [6, 8], 'CNOR': [6, 8]}
+
+        for zona in ['NORD', 'SUD', 'SICI', 'CSUD', 'CALA', 'SARD', 'CNOR']:
+
+            temp = prices.loc[:, ['period', 'flow_date', zona + '_MI1', 'DIFF_' + zona]]
+            temp_norm = temp.loc[temp.loc[:, 'DIFF_' + zona] < 12.89, :]
+            temp_extra = temp.loc[temp.loc[:, 'DIFF_' + zona] >= 12.89, :]
 
             for i in zip(Pr_std[zona], Qt_std[zona]):
 

@@ -7,7 +7,7 @@ import time
 
 BASE_URL = "https://hermes.phinergy.biz/api"
 USERNAME = "luca.bellomi"
-PASSWORD = "OceanosenzaMare44!"
+PASSWORD = "FondaleAlgoso12!"
 
 bids = pd.read_excel(r'C:\Users\lbellomi\PycharmProjects\pythonProject\Trader\bids.xlsm', sheet_name=None)
 
@@ -69,10 +69,4 @@ else:
 
     trader.place_orders(zone=zone, granularity=granularity[0], purpose_list=purpose, period=[int(x) for x in period],
                         price=[float(x) for x in price], qty=[float(x) for x in qty], message=key)
-
-
-# trader.build_xbid_orders_xml(zone=zone, granularity=granularity, purpose_list=purpose, period=[int(x) for x in period],
-#                         price=[float(x) for x in price], qty=[float(x) for x in qty])
-#
-# trader.submit_xbid_xml()
 

@@ -19,17 +19,19 @@ df_prezzi.loc[:, 'Date'] = df_prezzi.loc[:, 'Date'].apply(lambda d: datetime.str
 file = r"C:\Users\lbellomi\PycharmProjects\pythonProject\Trader\bids.xlsm"
 wb = openpyxl.load_workbook(file, keep_vba=True)
 # Select sheet "prices"
+ws = wb["Send Bids"]
+Data = ws["B2"].value
 ws = wb["Prices"]
-Data = ws["I6"].value
 zone = [cell.value for cell in ws["K"]]
-zone = [v for v in zone if v is not None and v != "ZONE"]
+#zone = ['NORD', 'CSUD', 'SUD', 'SICI']
+zone = ['NORD', 'CSUD', 'SUD', 'SICI', 'CNOR', 'CALA', 'SARD']
 
 df_prezzi = df_prezzi.loc[df_prezzi.loc[:, 'Date'] == Data.date(),:]
 df_prezzi = df_prezzi.loc[df_prezzi.loc[:, 'zona'].isin(zone),:]
 
 start_row = 2
-mapping_mi = {'NORD': 2, 'CSUD': 3, 'SUD': 4, 'SICI': 5, 'CNOR': 6, 'CALA':7, 'SARD': 8}
-mapping_mgp = {'NORD': 15, 'CSUD': 16, 'SUD': 17, 'SICI': 18, 'CNOR': 19, 'CALA': 20, 'SARD': 21}
+mapping_mi = {'NORD': 2, 'CSUD': 3, 'SUD': 4, 'SICI': 5, 'CNOR': 7, 'CALA':6, 'SARD': 8}
+mapping_mgp = {'NORD': 12, 'CSUD': 13, 'SUD': 14, 'SICI': 15, 'CNOR': 17, 'CALA': 16, 'SARD': 18}
 
 for zona in zone:
 
@@ -42,3 +44,4 @@ for zona in zone:
         ws.cell(row=i, column=22, value=Data)
 
 wb.save(file)
+
